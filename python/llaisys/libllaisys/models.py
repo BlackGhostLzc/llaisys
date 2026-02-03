@@ -85,12 +85,22 @@ def load_qwen2(lib):
     lib.llaisysQwen2ModelWeights.restype = POINTER(LlaisysQwen2Weights)
 
 
+    # lib.llaisysQwen2ModelInfer.argtypes = [
+    #         llaisysQwen2Model_t,  # model 指针
+    #         POINTER(c_int64),     # token_ids 数组 (int64_t*)
+    #         c_size_t              # ntoken 长度 (size_t)
+    #     ]
+    # lib.llaisysQwen2ModelInfer.restype = c_int64  # 返回生成的 token id
     lib.llaisysQwen2ModelInfer.argtypes = [
-            llaisysQwen2Model_t,  # model 指针
-            POINTER(c_int64),     # token_ids 数组 (int64_t*)
-            c_size_t              # ntoken 长度 (size_t)
-        ]
-    lib.llaisysQwen2ModelInfer.restype = c_int64  # 返回生成的 token id
+        llaisysQwen2Model_t,  # 1. model 指针
+        POINTER(c_int64),     # 2. token_ids 数组
+        c_size_t,             # 3. ntoken 长度
+        c_float,              # 4. temperature (新增)
+        c_float,              # 5. top_p (新增)
+        c_int                 # 6. top_k (新增)
+    ]
+    
+    lib.llaisysQwen2ModelInfer.restype = c_int64
 
 
     # lib.llaisysQwen2ModelKCache.argtypes = [llaisysQwen2Model_t, c_size_t]

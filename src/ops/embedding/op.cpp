@@ -5,9 +5,6 @@
 
 #include "../../utils.hpp"
 
-
-
-
 #include "cpu/embedding_cpu.hpp"
 
 namespace llaisys::ops {

@@ -5,7 +5,9 @@ from ..libllaisys import DeviceType
 from pathlib import Path
 import safetensors
 import json
-from ctypes import byref, c_int, c_size_t, c_float, c_int64, c_uint32, c_void_p
+from ctypes import byref, c_int, c_size_t, c_float, c_int64, c_uint32, c_void_p, memmove
+
+import re
 
 from ..libllaisys import (
     LIB_LLAISYS,
@@ -93,6 +95,8 @@ class Qwen2:
 
         print("python call llaisysQwen2ModelCreate")
         device_ids = (c_int * 1)(0)
+
+        # 这个函数用于为tensor分配内存
         self._model = LIB_LLAISYS.llaisysQwen2ModelCreate(
             byref(model_meta),
             llaisysDeviceType_t(device),
@@ -103,10 +107,99 @@ class Qwen2:
         if not self._model:
             raise RuntimeError("llaisysQwen2ModelCreate failed")
 
-            
         self._model_weights = LIB_LLAISYS.llaisysQwen2ModelWeights(self._model)
         self._meta = model_meta
 
+        w_struct = self._model_weights.contents
+
+        weight_files = list(model_path.glob("*.safetensors"))
+        if not weight_files:
+            raise RuntimeError(".safetensors file not exsist")
+        
+        weight_files = list(model_path.glob("*.safetensors"))
+        if not weight_files:
+            weight_files = list(model_path.glob("*.bin"))
+
+        print(f"Loading weights from {len(weight_files)} files...")
+        layer_pattern = re.compile(r"model\.layers\.(\d+)\.(.*)")
+
+        for wf in weight_files:
+            # 始终使用 pt 框架打开，这样可以直接获得 Tensor 对象
+            with safetensors.safe_open(wf, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    # 获取 Tensor (PyTorch Tensor)
+                    tensor = f.get_tensor(key)
+                    
+                    # === 关键逻辑：处理数据类型转换 ===
+                    if use_torch_loader:
+                        # 如果原始是 BF16，这里必须转为 F16，否则 C++ 端全是乱码
+                        if tensor.dtype == torch.bfloat16:
+                            tensor = tensor.to(torch.float16)
+                    elif dtype == DataType.F32 and tensor.dtype != torch.float32:
+                        tensor = tensor.to(torch.float32)
+                    
+                    # 获取源数据指针和大小
+                    # 注意：必须确保 tensor 是连续的，否则 data_ptr 可能不正确
+                    if not tensor.is_contiguous():
+                        tensor = tensor.contiguous()
+                        
+                    src_ptr = tensor.data_ptr()
+                    src_size = tensor.numel() * tensor.element_size()
+
+                    # === 名称映射 (Map Name -> C Pointer) ===
+                    dest_tensor = None
+                    
+                    if key == "model.embed_tokens.weight":
+                        dest_tensor = w_struct.in_embed
+                    elif key == "lm_head.weight":
+                        dest_tensor = w_struct.out_embed
+                    elif key == "model.norm.weight":
+                        dest_tensor = w_struct.out_norm_w
+                    else:
+                        match = layer_pattern.search(key)
+                        if match:
+                            layer_idx = int(match.group(1))
+                            suffix = match.group(2)
+                            
+                            # 根据后缀映射到对应的指针数组
+                            if "input_layernorm.weight" in suffix:
+                                dest_tensor = w_struct.attn_norm_w[layer_idx]
+                            
+                            elif "self_attn.q_proj.weight" in suffix:
+                                dest_tensor = w_struct.attn_q_w[layer_idx]
+                            elif "self_attn.q_proj.bias" in suffix:
+                                dest_tensor = w_struct.attn_q_b[layer_idx]
+                                
+                            elif "self_attn.k_proj.weight" in suffix:
+                                dest_tensor = w_struct.attn_k_w[layer_idx]
+                            elif "self_attn.k_proj.bias" in suffix:
+                                dest_tensor = w_struct.attn_k_b[layer_idx]
+                                
+                            elif "self_attn.v_proj.weight" in suffix:
+                                dest_tensor = w_struct.attn_v_w[layer_idx]
+                            elif "self_attn.v_proj.bias" in suffix:
+                                dest_tensor = w_struct.attn_v_b[layer_idx]
+                                
+                            elif "self_attn.o_proj.weight" in suffix:
+                                dest_tensor = w_struct.attn_o_w[layer_idx]
+                                
+                            elif "post_attention_layernorm.weight" in suffix:
+                                dest_tensor = w_struct.mlp_norm_w[layer_idx]
+                                
+                            elif "mlp.gate_proj.weight" in suffix:
+                                dest_tensor = w_struct.mlp_gate_w[layer_idx]
+                            elif "mlp.up_proj.weight" in suffix:
+                                dest_tensor = w_struct.mlp_up_w[layer_idx]
+                            elif "mlp.down_proj.weight" in suffix:
+                                dest_tensor = w_struct.mlp_down_w[layer_idx]
+
+                    # === 执行内存拷贝 ===
+                    if dest_tensor is not None and dest_tensor != 0:
+                        # 这里通过 ctypes.memmove 将 Python(Torch) 内存块复制到 C++ 内存块
+                        # dest_tensor类型为 llaisysTensor_t
+                        LIB_LLAISYS.tensorLoad(dest_tensor, c_void_p(src_ptr))
+
+        print("Model initialization complete.")
 
 
     def generate(
@@ -117,7 +210,26 @@ class Qwen2:
         top_p: float = 0.8,
         temperature: float = 0.8,
     ):
-
         # TODO: Implement generate function
+        current_ids = list(inputs)
 
-        return []
+        # 3. 循环生成
+        for _ in range(max_new_tokens):
+            seq_len = len(current_ids)
+            c_tokens = (c_int64 * seq_len)(*current_ids)
+
+            # 调用 C++ 推理
+            # 注意：这里每次都把完整的 current_ids 传进去
+            next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
+                self._model, c_tokens, c_size_t(seq_len),
+                c_float(temperature), c_float(top_p), c_int(top_k)
+            )
+
+            # 结束条件
+            if next_token == self._meta.end_token:
+                break
+            
+            current_ids.append(next_token)
+            # print(f"Generated: {next_token}") # Debug
+
+        return current_ids
