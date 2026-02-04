@@ -78,6 +78,18 @@ target("llaisys-ops")
     add_files("src/ops/*/*.cpp")
 target_end()
 
+-- 【新增】添加 models 模块的编译目标
+target("llaisys-models")
+    set_kind("static")
+    -- Qwen2 实现中用到了 ops, tensor 和 core，所以需要添加依赖
+    add_deps("llaisys-ops")
+    add_deps("llaisys-tensor")
+    add_deps("llaisys-core")
+    on_install(function(target) end) -- 禁止安装中间产物
+    -- 编译 src/models 下所有的 cpp 文件 (包括 qwen2.cpp)
+    add_files("src/models/*/*.cpp")
+target_end()
+
 target("llaisys")
     set_kind("shared") -- 最终的动态库
     add_deps("llaisys-utils")
@@ -85,6 +97,7 @@ target("llaisys")
     add_deps("llaisys-core")
     add_deps("llaisys-tensor")
     add_deps("llaisys-ops")
+    add_deps("llaisys-models")
 
     add_files("src/llaisys/*.cc")
     

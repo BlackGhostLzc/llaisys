@@ -4,6 +4,7 @@
 #include <cstddef>
 
 namespace llaisys::ops::cpu {
-void argmax(std::byte* max_idx_ptr, std::byte* max_val_ptr, const std::byte* vals_ptr, llaisysDataType_t dtype, size_t numel);
+void argmax(std::byte *idx_out, std::byte *val_out, const std::byte *val_in,
+            llaisysDataType_t dtype, size_t outer_size, size_t inner_size);
 
 } // namespace llaisys::ops::cpu
